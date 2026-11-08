@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LinkSeguro</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--text:#1d2330;--muted:#5d6678;--line:#dde1e8;--ok:#2e7d4a;--warn:#b45309;--bad:#b91c1c;--unk:#4b5563;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171d;--card:#1e232c;--text:#eef0f4;--muted:#9aa3b5;--line:#313846}}
+:root[data-theme="dark"]{--bg:#14171d;--card:#1e232c;--text:#eef0f4;--muted:#9aa3b5;--line:#313846}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.5}
+main{max-width:640px;margin:0 auto;padding:24px 16px}
+h1{margin:0 0 4px;font-size:28px}
+.sub{color:var(--muted);margin:0 0 20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+input{flex:1;min-width:200px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font-size:16px}
+button{padding:12px 18px;border:0;border-radius:8px;background:var(--text);color:var(--bg);font-size:15px;font-weight:600;cursor:pointer}
+button.t{background:transparent;color:var(--text);border:1px solid var(--line);font-weight:500;font-size:13px;padding:8px 12px}
+.label{font-size:13px;color:var(--muted);margin:14px 0 8px}
+#res{display:none;border-radius:12px;padding:18px;color:#fff;margin-bottom:16px}
+#res.ok{background:var(--ok)}#res.warn{background:var(--warn)}#res.bad{background:var(--bad)}#res.unk{background:var(--unk)}
+#res h2{margin:0 0 6px;font-size:22px}
+#res p{margin:8px 0 0}
+#res ul{margin:10px 0 0;padding-left:20px}
+#res li{margin-bottom:8px}
+#res .dom{font-size:13px;opacity:.9;word-break:break-all}
+.note{font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+<h1>🛡️ LinkSeguro</h1>
+<p class="sub">Pega cualquier enlace y revisa si es seguro antes de abrirlo.</p>
+
+<div class="card">
+<div class="row">
+<input id="url" type="text" placeholder="https://..." autocomplete="off">
+<button id="go">Analizar</button>
+</div>
+<div class="label">Enlaces de prueba para la demostración:</div>
+<div class="row">
+<button class="t" data-u="https://www.bancolombia.com.co/personas">🟢 Seguro</button>
+<button class="t" data-u="https://tiendaonline-ofertas.com/premio">🟡 Dudoso</button>
+<button class="t" data-u="https://bancolonbia.com.co/login">🔴 Peligroso</button>
+</div>
+</div>
+
+<div id="res" role="status" aria-live="polite"></div>
+
+<p class="note">Prototipo educativo: analiza el texto del enlace con reglas de detección de phishing y, cuando es posible, consulta la antigüedad real del dominio en un servicio público (RDAP) enviando solo el nombre del dominio, nunca el enlace completo. No abre el enlace y no reemplaza un antivirus ni una base de datos profesional de amenazas.</p>
+</main>
+
+<script>
+// ---------- Datos de referencia ----------
+const OFICIALES = {
+  'bancolombia.com.co': 'Bancolombia', 'davivienda.com': 'Davivienda', 'nequi.com.co': 'Nequi',
+  'bancodebogota.com': 'Banco de Bogotá', 'bbva.com.co': 'BBVA Colombia', 'dian.gov.co': 'la DIAN',
+  'lasalle.edu.co': 'la Universidad de La Salle', 'mercadolibre.com.co': 'Mercado Libre',
+  'google.com': 'Google', 'microsoft.com': 'Microsoft', 'apple.com': 'Apple', 'amazon.com': 'Amazon',
+  'paypal.com': 'PayPal', 'facebook.com': 'Facebook', 'instagram.com': 'Instagram', 'whatsapp.com': 'WhatsApp',
+  'github.com': 'GitHub'
+};
+const ACORTADORES = ['bit.ly', 'tinyurl.com', 't.co', 'cutt.ly', 'is.gd', 'rb.gy', 'goo.gl', 'ow.ly', 'shorturl.at', 'tiny.cc'];
+const TLD_RIESGO = ['xyz', 'top', 'click', 'zip', 'mov', 'icu', 'tk', 'gq', 'ml', 'cf', 'work', 'support', 'rest', 'cyou', 'sbs'];
+const PALABRAS = ['login', 'signin', 'verifica', 'verify', 'secure', 'actualiza', 'update', 'bloquead', 'suspendid',
+  'premio', 'gratis', 'ganaste', 'clave', 'password', 'contrasena', 'token', 'otp', 'pago', 'factura', 'reclama', 'urgente', 'confirma'];
+const SUFIJOS2 = ['com.co', 'edu.co', 'org.co', 'gov.co', 'net.co', 'com.mx', 'co.uk', 'com.ar', 'com.br'];
+// Edad simulada (días) solo para los enlaces de la demostración
+const EDAD_SIMULADA = { 'tiendaonline-ofertas.com': 6 };
+
+// ---------- Utilidades ----------
+const sinTildes = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+function dominioRaiz(host) {
+  const p = host.split('.');
+  return SUFIJOS2.includes(p.slice(-2).join('.')) ? p.slice(-3).join('.') : p.slice(-2).join('.');
+}
+function distancia(a, b) { // distancia de Levenshtein
+  const m = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) m[0][j] = j;
+  for (let i = 1; i <= a.length; i++)
+    for (let j = 1; j <= b.length; j++)
+      m[i][j] = Math.min(m[i-1][j] + 1, m[i][j-1] + 1, m[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+  return m[a.length][b.length];
+}
+async function edadReal(raiz) { // antigüedad en días según RDAP; null si no se pudo consultar
+  try {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 4000);
+    const r = await fetch('https://rdap.org/domain/' + encodeURIComponent(raiz), { signal: c.signal });
+    clearTimeout(t);
+    if (!r.ok) return null;
+    const j = await r.json();
+    const ev = (j.events || []).find(e => e.eventAction === 'registration');
+    return ev ? Math.floor((Date.now() - new Date(ev.eventDate)) / 86400000) : null;
+  } catch { return null; }
+}
+
+// ---------- Análisis ----------
+async function evaluar(texto) {
+  const s = [];
+  const add = (pts, que, sig) => s.push({ pts, que, sig });
+
+  if (/^(javascript|data|vbscript):/i.test(texto)) {
+    return resultado('bad', 'Peligroso', 'Esto no es una dirección web normal sino código que se ejecutaría al abrirlo.',
+      [{ que: 'Enlace que ejecuta código', sig: 'Los enlaces que empiezan por javascript: o data: pueden ejecutar instrucciones en tu navegador, por lo que no deberías abrirlos.' }], '');
+  }
+  let u;
+  try { u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(texto) ? texto : 'https://' + texto); }
+  catch { return resultado('unk', 'Enlace no válido', 'No se pudo leer el texto como un enlace.', [{ que: 'Formato incorrecto', sig: 'Revisa que el enlace esté completo y no tenga espacios.' }], ''); }
+
+  const host = u.hostname.toLowerCase().replace(/^www\./, '');
+  const esIP = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+  if (!esIP && !host.includes('.')) {
+    return resultado('unk', 'Enlace no válido', 'El texto no parece una dirección web completa.', [{ que: 'Sin dominio', sig: 'Falta la parte final de la dirección, como .com o .co.' }], '');
+  }
+  const raiz = esIP ? host : dominioRaiz(host);
+  const etiqueta = sinTildes(raiz.split('.')[0]).replace(/0/g, 'o').replace(/1/g, 'l').replace(/3/g, 'e').replace(/5/g, 's');
+  const rutaTexto = sinTildes((u.pathname + u.search).toLowerCase());
+  const https = u.protocol === 'https:';
+  const oficial = OFICIALES[raiz] || null;
+
+  // 1. Ocultamiento del destino
+  if (u.username || u.password) add(40, 'Contiene un @ o credenciales', 'Antes del símbolo @ se puede poner un nombre que parezca legítimo para engañarte, mientras que el sitio real es el que va después.');
+  if (/[?&](url|redirect|redir|next|continue|dest|target)=https?/i.test(u.search)) add(15, 'Redirige a otro sitio', 'El enlace lleva dentro otra dirección a la que te enviará, algo que los estafadores usan para esconder el destino final.');
+  if (ACORTADORES.includes(raiz)) add(25, 'Enlace acortado', 'Los acortadores esconden el destino real y no es posible saber a dónde llevan sin abrirlos; conviene pedir el enlace completo.');
+  if (host.includes('xn--')) add(50, 'Usa caracteres especiales en el dominio', 'Algunas letras de otros alfabetos se ven idénticas a las latinas, y así se puede falsificar el nombre de una entidad conocida.');
+  if (esIP) add(35, 'Usa una dirección IP', 'Los sitios legítimos casi siempre usan un nombre de dominio, mientras que una dirección numérica suele indicar un servidor improvisado.');
+
+  // 2. Suplantación de marcas
+  if (!oficial) {
+    let imita = false;
+    for (const [dom, nombre] of Object.entries(OFICIALES)) {
+      const marca = dom.split('.')[0];
+      const tol = marca.length < 8 ? 1 : 2;
+      if (etiqueta !== marca && distancia(etiqueta, marca) <= tol) {
+        add(70, 'Imita a ' + nombre, 'El dominio "' + raiz + '" se parece mucho a "' + dom + '" pero no es el oficial, una señal típica de phishing.'); imita = true; break;
+      }
+      if (host.includes(marca)) {
+        add(60, 'Usa el nombre de ' + nombre, 'El enlace incluye "' + marca + '", pero el dominio real es "' + raiz + '", que no pertenece a esa entidad.'); imita = true; break;
+      }
+    }
+    if (!imita) for (const [dom, nombre] of Object.entries(OFICIALES)) {
+      const marca = dom.split('.')[0];
+      if (rutaTexto.includes(marca)) { add(20, 'Menciona a ' + nombre + ' en la ruta', 'El nombre de una entidad conocida aparece dentro del enlace, pero el sitio es otro, lo cual se usa para generar confianza.'); break; }
+    }
+  }
+
+  // 3. Señales técnicas
+  if (!https) add(20, 'No usa HTTPS', 'La conexión no está cifrada, así que lo que escribas en esa página podría ser visto por terceros.');
+  if (u.port && !['80', '443'].includes(u.port)) add(15, 'Usa un puerto poco común (' + u.port + ')', 'Los sitios normales no suelen usar puertos especiales.');
+  const tld = host.split('.').pop();
+  if (!oficial && TLD_RIESGO.includes(tld)) add(15, 'Terminación poco confiable (.' + tld + ')', 'Esta terminación es barata y muy usada en sitios fraudulentos, aunque también tiene usos legítimos.');
+  if (host.split('.').length - raiz.split('.').length >= 3) add(15, 'Demasiados subdominios', 'Una cadena larga de subdominios suele servir para que el nombre de una entidad conocida aparezca al principio y confunda.');
+  if ((host.match(/-/g) || []).length >= 3) add(10, 'Muchos guiones en el dominio', 'Los dominios con varios guiones suelen ser inventados para parecer oficiales.');
+  if (u.href.length > 100) add(10, 'Enlace muy largo', 'Los enlaces extensos pueden esconder información sospechosa al final.');
+  if ((texto.match(/%[0-9a-f]{2}/gi) || []).length >= 5) add(10, 'Muchos caracteres codificados', 'Los símbolos codificados se usan a veces para disfrazar el contenido real del enlace.');
+  if (/\.(exe|apk|scr|msi|bat|cmd|jar|vbs|ps1|iso|dmg)$/i.test(u.pathname)) add(50, 'Descarga un archivo ejecutable', 'Este tipo de archivo puede instalar un virus en tu dispositivo si lo abres.');
+  else if (/\.(zip|rar|7z)$/i.test(u.pathname)) add(20, 'Descarga un archivo comprimido', 'Los archivos comprimidos pueden esconder programas dañinos.');
+
+  // 4. Palabras de presión o engaño
+  const halladas = PALABRAS.filter(p => rutaTexto.includes(p) || sinTildes(host).includes(p));
+  if (halladas.length) add(Math.min(20, halladas.length * 10), 'Palabras que buscan presionarte', 'El enlace contiene términos como "' + halladas.slice(0, 3).join('", "') + '", frecuentes en mensajes que piden datos o prometen premios.');
+
+  // 5. Antigüedad del dominio
+  let edad = EDAD_SIMULADA[raiz];
+  let simulada = edad !== undefined;
+  if (!oficial && !esIP && edad === undefined) edad = await edadReal(raiz);
+  if (edad !== null && edad !== undefined) {
+    const txt = simulada ? ' (dato simulado para la demostración)' : ' (según el registro público del dominio)';
+    if (edad < 30) add(25, 'Dominio muy reciente: ' + edad + ' días' + txt, 'Los sitios fraudulentos suelen ser nuevos y desechables. Esto no prueba que sea malicioso, pero exige cuidado.');
+    else if (edad < 180) add(10, 'Dominio relativamente nuevo: ' + edad + ' días' + txt, 'Tiene pocos meses de existencia, así que todavía no tiene un historial que lo respalde.');
+  }
+
+  const puntos = s.reduce((a, x) => a + x.pts, 0);
+
+  if (oficial && !s.length && https) {
+    return resultado('ok', 'Seguro', 'Este enlace pertenece a ' + oficial + ', una entidad conocida, y usa conexión cifrada.',
+      [{ que: 'Dominio oficial y conocido', sig: raiz + ' es el dominio oficial de ' + oficial + '.' }, { que: 'Conexión cifrada (HTTPS)', sig: 'La comunicación con el sitio está protegida.' }],
+      'Puedes abrirlo con tranquilidad, aunque conviene asegurarte de que el mensaje donde lo recibiste sea confiable.', raiz);
+  }
+  if (puntos >= 40) return resultado('bad', 'Peligroso', 'Este enlace reúne señales típicas de phishing o de un sitio fraudulento.', s,
+    'No lo abras ni escribas datos en él. Si llegó por mensaje, no respondas y bórralo; si dice venir de tu banco, entra escribiendo tú mismo la dirección oficial.', raiz);
+  if (puntos > 0) return resultado('warn', 'Dudoso', 'Este enlace tiene señales de cuidado, aunque no es una prueba definitiva de que sea malicioso.', s,
+    'Evita ingresar contraseñas o datos personales y confirma por otro medio, como llamando a la entidad, que el mensaje es real.', raiz);
+  return resultado('unk', 'No verificado', 'No está en la lista de sitios oficiales que conoce esta demostración y no se detectaron señales de riesgo.',
+    [{ que: 'Sin señales de riesgo', sig: 'Eso no garantiza que sea seguro, porque no se puede revisar el contenido de la página.' }],
+    'Antes de escribir datos, verifica que la dirección corresponda exactamente a la entidad que esperas.', raiz);
+}
+function resultado(nivel, titulo, resumen, hallazgos, accion, raiz) { return { nivel, titulo, resumen, hallazgos, accion, raiz }; }
+
+// ---------- Interfaz ----------
+async function mostrar(texto) {
+  const box = document.getElementById('res');
+  box.className = 'unk'; box.style.display = 'block'; box.textContent = 'Analizando el enlace…';
+  const a = await evaluar(texto.trim());
+  box.className = a.nivel; box.textContent = '';
+  const h = document.createElement('h2');
+  h.textContent = ({ ok: '🟢 ', warn: '🟡 ', bad: '🔴 ', unk: '⚪ ' })[a.nivel] + a.titulo;
+  const r = document.createElement('p'); r.textContent = a.resumen;
+  box.append(h, r);
+  if (a.raiz) { const d = document.createElement('p'); d.className = 'dom'; d.textContent = 'Dominio analizado: ' + a.raiz; box.append(d); }
+  const ul = document.createElement('ul');
+  a.hallazgos.forEach(x => {
+    const li = document.createElement('li'), b = document.createElement('strong');
+    b.textContent = x.que; li.append(b, ' — ' + x.sig); ul.appendChild(li);
+  });
+  box.append(ul);
+  if (a.accion) { const p = document.createElement('p'); const b = document.createElement('strong'); b.textContent = 'Qué hacer: '; p.append(b, a.accion); box.append(p); }
+}
+const inp = document.getElementById('url');
+document.getElementById('go').onclick = () => inp.value.trim() && mostrar(inp.value);
+inp.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('go').click(); });
+document.querySelectorAll('button.t').forEach(b => b.onclick = () => { inp.value = b.dataset.u; mostrar(b.dataset.u); });
+</script>
+</body>
+</html>
